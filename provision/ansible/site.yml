@@ -1,0 +1,11 @@
+- name: Mirage honeynet host
+  hosts: all
+  become: true
+  roles:
+    - base
+    - network
+    - docker
+    - firewall
+    - suricata
+    - stack
+    - observability

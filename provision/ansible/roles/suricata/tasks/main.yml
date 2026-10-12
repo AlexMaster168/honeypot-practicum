@@ -1,0 +1,93 @@
+- name: Install official OISF repository helper
+  ansible.builtin.apt:
+    name: software-properties-common
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Enable official OISF stable repository
+  ansible.builtin.apt_repository:
+    repo: ppa:oisf/suricata-stable
+    state: present
+
+- name: Remove legacy standalone updater (OISF package includes its own)
+  ansible.builtin.apt:
+    name: suricata-update
+    state: absent
+
+- name: Install IDS and rule updater
+  ansible.builtin.apt:
+    name: [suricata, python3-yaml]
+    state: latest
+    update_cache: true
+    cache_valid_time: 3600
+  environment:
+    NEEDRESTART_MODE: l
+
+- name: Create IDS runtime user
+  ansible.builtin.user:
+    name: suricata
+    system: true
+    create_home: false
+
+- name: IDS output directory
+  ansible.builtin.file:
+    path: /var/log/suricata
+    state: directory
+    owner: suricata
+    group: suricata
+    mode: "0755"
+
+- name: Download Emerging Threats Open rules
+  ansible.builtin.command: suricata-update --no-reload
+  args:
+    creates: /var/lib/suricata/rules/suricata.rules
+
+- name: Training scan detection rule
+  ansible.builtin.copy:
+    dest: /etc/suricata/rules/mirage.rules
+    content: |
+      alert tcp 10.66.0.50 any -> 10.66.0.0/24 any (msg:"MIRAGE lab TCP SYN scan"; flags:S; flow:stateless; detection_filter:track by_src,count 10,seconds 10; sid:9900001; rev:1;)
+  register: ids_rules
+
+- name: Configure IDS capture and TLS fingerprinting
+  ansible.builtin.command: python3 /vagrant/scripts/configure-suricata.py
+  register: ids_config
+  changed_when: "'changed' in ids_config.stdout"
+
+- name: Disable default IDS unit
+  ansible.builtin.systemd_service:
+    name: suricata
+    state: stopped
+    enabled: false
+
+- name: Dedicated honeynet IDS unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/mirage-suricata.service
+    content: |
+      [Unit]
+      Description=Mirage honeynet IDS
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=simple
+      TimeoutStartSec=600
+      TimeoutStopSec=30
+      ExecStart=/usr/bin/suricata -c /etc/suricata/mirage.yaml --af-packet=honeynet --user suricata --group suricata
+      Restart=on-failure
+      [Install]
+      WantedBy=multi-user.target
+  register: ids_unit
+
+- name: Validate honeynet IDS configuration
+  ansible.builtin.command: suricata -T -c /etc/suricata/mirage.yaml
+  async: 600
+  poll: 10
+  changed_when: false
+  when: ids_config is changed or ids_rules is changed
+
+- name: Start honeynet IDS
+  ansible.builtin.systemd_service:
+    name: mirage-suricata
+    state: "{{ 'restarted' if ids_config is changed or ids_rules is changed or ids_unit is changed else 'started' }}"
+    enabled: true
+    daemon_reload: true

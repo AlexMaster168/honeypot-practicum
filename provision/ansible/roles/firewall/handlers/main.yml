@@ -1,0 +1,4 @@
+# Only our own table is touched (no `flush ruleset`), so Docker's chains survive a reload.
+- name: Reload nftables
+  ansible.builtin.command: nft -f /etc/nftables.conf
+  changed_when: true

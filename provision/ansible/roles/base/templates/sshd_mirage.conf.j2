@@ -1,0 +1,8 @@
+# Managed by ansible (mirage). Real admin sshd: NAT (vagrant) + mgmt only.
+ListenAddress {{ nat_ip }}
+ListenAddress {{ mgmt_ip }}
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+X11Forwarding no
+MaxAuthTries 3

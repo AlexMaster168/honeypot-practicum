@@ -1,0 +1,75 @@
+# Everything traps write (logs, downloaded malware, tty recordings) lands on a noexec mount.
+- name: Data root
+  ansible.builtin.file:
+    path: "{{ data_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Data root mounted noexec/nosuid/nodev
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "{{ data_dir }} {{ data_dir }} none bind,noexec,nosuid,nodev 0 0"
+  register: fstab
+
+- name: Mount data root
+  ansible.builtin.shell: |
+    systemctl daemon-reload
+    mountpoint -q {{ data_dir }} && mount -o remount {{ data_dir }} || mount {{ data_dir }}
+  when: fstab is changed
+
+- name: Trap data dirs
+  ansible.builtin.file:
+    path: "{{ data_dir }}/{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode | default('0755') }}"
+  loop: "{{ trap_dirs }}"
+  loop_control: { label: "{{ item.path }}" }
+
+- name: Generate private Elastic credentials
+  ansible.builtin.command: python3 /vagrant/scripts/generate-secrets.py
+  register: private_secrets
+  changed_when: "'created' in private_secrets.stdout"
+  no_log: true
+
+- name: Stack files
+  ansible.builtin.copy:
+    src: "{{ stack_src }}/"
+    dest: "{{ stack_dir }}/"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "u=rwX,g=rX,o=rX"
+  register: stack_files
+
+- name: Build application image using host network only during dependency installation
+  ansible.builtin.command:
+    cmd: docker build --network host -t mirage-apps:local .
+    chdir: "{{ stack_dir }}/apps"
+  when: stack_files is changed
+
+- name: Generate synthetic honeytokens and Cowrie fake filesystems
+  ansible.builtin.shell: |
+    mkdir -p {{ stack_dir }}/seeds
+    docker run --rm cowrie/cowrie:latest -c 'import sys; sys.stdout.buffer.write(open("/cowrie/cowrie-git/src/cowrie/data/fs.pickle","rb").read())' > {{ stack_dir }}/seeds/base.pickle
+    python3 /vagrant/honeytokens/generate.py --base {{ stack_dir }}/seeds/base.pickle --out {{ stack_dir }}/seeds
+    openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj /CN=srv-web01 -keyout {{ stack_dir }}/seeds/web.key -out {{ stack_dir }}/seeds/web.crt
+    chmod 755 {{ stack_dir }}/seeds
+    chmod 644 {{ stack_dir }}/seeds/*.* {{ stack_dir }}/seeds/deploy_key
+  args:
+    creates: "{{ stack_dir }}/seeds/registry.yml"
+
+# Config is bind-mounted, so an edit alone doesn't recreate the container.
+- name: Restart traps on config change
+  ansible.builtin.command:
+    cmd: docker compose restart
+    chdir: "{{ stack_dir }}"
+  when: stack_files is changed
+
+- name: Stack up
+  ansible.builtin.command:
+    cmd: docker compose up -d --remove-orphans --wait --wait-timeout 300
+    chdir: "{{ stack_dir }}"
+  register: compose_up
+  changed_when: "'Started' in compose_up.stderr or 'Recreated' in compose_up.stderr or 'Created' in compose_up.stderr"

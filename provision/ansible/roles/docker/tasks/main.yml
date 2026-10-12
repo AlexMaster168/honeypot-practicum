@@ -1,0 +1,33 @@
+- name: Docker apt repo
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    signed_by: https://download.docker.com/linux/ubuntu/gpg
+
+- name: Docker engine + compose
+  ansible.builtin.apt:
+    name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+    update_cache: true
+
+- name: Docker daemon config
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "userland-proxy": false,
+        "ipv6": false,
+        "log-driver": "json-file",
+        "log-opts": {"max-size": "20m", "max-file": "3"}
+      }
+  notify: Restart docker
+
+- name: vagrant user can run docker
+  ansible.builtin.user:
+    name: vagrant
+    groups: docker
+    append: true
+
+- ansible.builtin.meta: flush_handlers

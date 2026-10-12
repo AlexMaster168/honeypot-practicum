@@ -1,0 +1,243 @@
+# Mirage honeynet stack. Deployed by ansible to /opt/mirage/stack, data lives in /srv/mirage/data.
+#
+# Each trap gets its own bridge with inter-container traffic disabled, so a compromised trap
+# can't reach its neighbours. Egress to the outside is dropped by nftables on the host.
+# Trap ports are published on the honeynet addresses only:
+#   10.66.0.10 srv-web01   10.66.0.20 db-prod01   10.66.0.30 fs01
+
+name: mirage
+
+x-trap: &trap
+  restart: unless-stopped
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  pids_limit: 256
+  mem_limit: 512m
+  cpus: 1.0
+  tmpfs: ["/tmp:size=64m,noexec,nosuid"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  cowrie-web01:
+    <<: *trap
+    image: cowrie/cowrie:latest
+    hostname: srv-web01
+    networks: [web01]
+    ports:
+      - "10.66.0.10:22:2222"
+    volumes:
+      - ./traps/cowrie/web01:/cowrie/cowrie-git/etc:ro
+      - /srv/mirage/data/cowrie-web01:/cowrie/cowrie-git/var
+      - ./seeds:/seeds:ro
+
+  cowrie-db01:
+    <<: *trap
+    image: cowrie/cowrie:latest
+    hostname: db-prod01
+    networks: [db01]
+    environment:
+      PYTHONPATH: /extensions:/cowrie/cowrie-git/src
+    ports:
+      - "10.66.0.20:22:2222"
+    volumes:
+      - ./traps/cowrie/db01:/cowrie/cowrie-git/etc:ro
+      - /srv/mirage/data/cowrie-db01:/cowrie/cowrie-git/var
+      - ./seeds:/seeds:ro
+      - ./seeds/db-userdb.txt:/cowrie/cowrie-git/etc/userdb.txt:ro
+      - ./traps/cowrie/db01/sitecustomize.py:/extensions/sitecustomize.py:ro
+
+  # One OpenCanary serves low-interaction services for all three hosts; the port tells them apart.
+  opencanary:
+    <<: *trap
+    image: thinkst/opencanary:latest
+    networks: [canary]
+    # binds as root, then twistd drops to nobody
+    cap_add: [NET_BIND_SERVICE, SETUID, SETGID]
+    # twistd writes its pidfile to /var/run (-> /run)
+    tmpfs: ["/tmp:size=64m,noexec,nosuid", "/var/tmp:size=16m,noexec,nosuid", "/run:size=1m,noexec,nosuid"]
+    ports:
+      - "10.66.0.10:21:21"
+      - "10.66.0.20:3306:3306"
+      - "10.66.0.20:6379:6379"
+      - "10.66.0.20:5900:5900"
+      - "10.66.0.30:1433:1433"   # MSSQL lives on the Windows box
+      - "10.66.0.30:3389:3389"
+    volumes:
+      - ./traps/opencanary/opencanary.conf:/etc/opencanaryd/opencanary.conf:ro
+      - /srv/mirage/data/opencanary:/var/log/opencanary
+
+  dionaea:
+    <<: *trap
+    image: ghcr.io/telekom-security/dionaea:24.04.1
+    hostname: fs01
+    networks: [fs01]
+    # the binary carries cap_net_bind_service as a file capability
+    security_opt: []
+    cap_add: [NET_BIND_SERVICE]
+    # image check (kills a dionaea stuck at 100% CPU) runs every 5 min; check sooner after start
+    healthcheck:
+      test: ["CMD-SHELL", "python3 /cpu_check.py $$(pgrep -of dionaea) 99"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 20s
+      start_interval: 5s
+    ports:
+      - "10.66.0.30:21:21"
+      - "10.66.0.30:135:135"
+      - "10.66.0.30:445:445"
+    volumes:
+      - ./traps/dionaea/services:/opt/dionaea/etc/dionaea/services:ro
+      - /srv/mirage/data/dionaea/var:/opt/dionaea/var/dionaea
+      - /srv/mirage/data/dionaea/log:/opt/dionaea/var/log
+      - dionaea-lib:/opt/dionaea/var/lib
+
+  # ---- Observability: Vector -> Elasticsearch -> Kibana (management network only) ----
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    restart: unless-stopped
+    networks: [obs]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      ELASTIC_PASSWORD: "${ELASTIC_PASSWORD:?Run the secrets provisioning task}"
+      bootstrap.memory_lock: "true"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+      ingest.geoip.downloader.enabled: "false"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    mem_limit: 2g
+    volumes:
+      - /srv/mirage/data/elasticsearch:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u elastic:$$ELASTIC_PASSWORD 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s' >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+
+  # One-shot: installs the index template before Vector ships its first document,
+  # so source.ip maps as an ip field instead of being auto-detected as text.
+  es-init:
+    image: curlimages/curl:8.11.0
+    networks: [obs]
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    restart: "no"
+    environment:
+      ELASTIC_PASSWORD: "${ELASTIC_PASSWORD}"
+      KIBANA_PASSWORD: "${KIBANA_PASSWORD}"
+      VECTOR_PASSWORD: "${VECTOR_PASSWORD}"
+    volumes:
+      - ./elastic/index-template.json:/tpl.json:ro
+      - ./elastic/init-security.sh:/init-security.sh:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - 'sh /init-security.sh'
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    restart: unless-stopped
+    networks: [obs]
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    environment:
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: "${KIBANA_PASSWORD}"
+      XPACK_SECURITY_ENCRYPTIONKEY: "${KIBANA_KEY}"
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: "${KIBANA_KEY}"
+      XPACK_REPORTING_ENCRYPTIONKEY: "${KIBANA_KEY}"
+      TELEMETRY_ENABLED: "false"
+      NODE_OPTIONS: "--max-old-space-size=1024"
+    mem_limit: 1536m
+    ports:
+      - "192.168.56.10:5601:5601"   # management network only
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5601/login >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 40
+      start_period: 90s
+
+  vector:
+    image: timberio/vector:0.43.1-debian
+    restart: unless-stopped
+    user: "0:0"                      # trap logs are owned by assorted uids; root reads them all
+    group_add: ["65534"]             # OpenCanary's 2770 directory, with all capabilities dropped
+    networks: [obs]
+    environment:
+      VECTOR_PASSWORD: "${VECTOR_PASSWORD}"
+      CORRELATOR_KEY: "${CORRELATOR_KEY}"
+    depends_on:
+      es-init: { condition: service_completed_successfully }
+    read_only: true
+    cap_drop: [ALL]
+    mem_limit: 512m
+    volumes:
+      - ./vector/vector.yaml:/etc/vector/vector.yaml:ro
+      - /srv/mirage/data:/data:ro
+      - /srv/mirage/data/vector:/var/lib/vector
+      - /var/log/suricata:/ids:ro
+    command: ["--config", "/etc/vector/vector.yaml"]
+
+  mirage-web:
+    <<: *trap
+    image: mirage-apps:local
+    user: "10001:10001"
+    networks: [webtrap]
+    command: ["uvicorn", "web:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    volumes:
+      - ./seeds:/seeds:ro
+      - /srv/mirage/data/web:/logs
+
+  web-proxy:
+    <<: *trap
+    image: nginx:1.27.3-alpine
+    user: "101:101"
+    networks: [webtrap]
+    depends_on: [mirage-web]
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    ports:
+      - "10.66.0.10:80:8080"
+      - "10.66.0.10:443:8443"
+    volumes:
+      - ./traps/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./seeds:/seeds:ro
+
+  correlator:
+    <<: *trap
+    image: mirage-apps:local
+    user: "10001:10001"
+    networks: [obs]
+    environment:
+      CORRELATOR_KEY: "${CORRELATOR_KEY}"
+      ES_PASSWORD: "${VECTOR_PASSWORD}"
+    ports:
+      - "192.168.56.10:8088:8080"
+    volumes:
+      - ./seeds:/seeds:ro
+      - /srv/mirage/data/correlator:/state
+    command: ["uvicorn", "correlator:app", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]
+
+volumes:
+  dionaea-lib:
+
+networks:
+  web01:
+    driver_opts: { com.docker.network.bridge.name: br-web01, com.docker.network.bridge.enable_icc: "false" }
+  db01:
+    driver_opts: { com.docker.network.bridge.name: br-db01, com.docker.network.bridge.enable_icc: "false" }
+  canary:
+    driver_opts: { com.docker.network.bridge.name: br-canary, com.docker.network.bridge.enable_icc: "false" }
+  fs01:
+    driver_opts: { com.docker.network.bridge.name: br-fs01, com.docker.network.bridge.enable_icc: "false" }
+  # observability stack talks to itself here; nftables keeps it off the honeynet
+  obs:
+    driver_opts: { com.docker.network.bridge.name: br-obs }
+  webtrap:
+    # The proxy must reach its sole backend. This bridge has no other members.
+    driver_opts: { com.docker.network.bridge.name: br-webtrap }

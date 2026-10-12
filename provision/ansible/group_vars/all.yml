@@ -1,0 +1,15 @@
+# Interfaces are found by MAC/IP rather than name, so the box's NIC naming doesn't matter.
+honeynet_mac: "08:00:27:6a:00:10"
+honeynet_cidr: "10.66.0.0/24"
+# "Fake servers" — every trap publishes on one of these.
+honeynet_hosts:
+  srv-web01: 10.66.0.10
+  db-prod01: 10.66.0.20
+  fs01: 10.66.0.30
+
+mgmt_ip: 192.168.56.10
+mgmt_cidr: 192.168.56.0/24
+nat_ip: 10.0.2.15            # VirtualBox NAT, used by `vagrant ssh`
+
+# Reachable only from the management network.
+mgmt_tcp_ports: [22, 5601, 8088]

@@ -1,0 +1,7 @@
+# Weak creds an attacker can brute-force (attacker/wordlists has them).
+# First matching line wins; anything unmatched is rejected.
+root:x:!root
+root:x:123456
+root:x:P@ssw0rd
+admin:x:admin123
+support:x:support

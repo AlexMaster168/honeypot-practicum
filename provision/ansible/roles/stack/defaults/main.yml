@@ -1,0 +1,33 @@
+stack_src: /vagrant/stack
+stack_dir: /opt/mirage/stack
+data_dir: /srv/mirage/data
+
+# Bind-mounted into containers; owners match the uid each image runs as.
+trap_dirs:
+  - { path: cowrie-web01, owner: 999, group: 999 }
+  - { path: cowrie-web01/log/cowrie, owner: 999, group: 999 }
+  - { path: cowrie-web01/lib/cowrie/downloads, owner: 999, group: 999 }
+  - { path: cowrie-web01/lib/cowrie/tty, owner: 999, group: 999 }
+  - { path: cowrie-web01/run, owner: 999, group: 999 }
+  - { path: cowrie-db01, owner: 999, group: 999 }
+  - { path: cowrie-db01/log/cowrie, owner: 999, group: 999 }
+  - { path: cowrie-db01/lib/cowrie/downloads, owner: 999, group: 999 }
+  - { path: cowrie-db01/lib/cowrie/tty, owner: 999, group: 999 }
+  - { path: cowrie-db01/run, owner: 999, group: 999 }
+  # opencanary opens its log as root, then runs as nobody: setgid dir shared by both
+  - { path: opencanary, owner: 0, group: 65534, mode: "2770" }
+  - { path: dionaea, owner: 2000, group: 2000 }
+  - { path: dionaea/log, owner: 2000, group: 2000 }
+  - { path: dionaea/var, owner: 2000, group: 2000 }
+  - { path: dionaea/var/binaries, owner: 2000, group: 2000 }
+  - { path: dionaea/var/bistreams, owner: 2000, group: 2000 }
+  - { path: dionaea/var/rtp, owner: 2000, group: 2000 }
+  - { path: dionaea/var/roots/ftp, owner: 2000, group: 2000 }
+  - { path: dionaea/var/roots/tftp, owner: 2000, group: 2000 }
+  - { path: dionaea/var/roots/www, owner: 2000, group: 2000 }
+  - { path: dionaea/var/roots/upnp, owner: 2000, group: 2000 }
+  # observability
+  - { path: elasticsearch, owner: 1000, group: 1000 }
+  - { path: vector, owner: 0, group: 0 }
+  - { path: web, owner: 10001, group: 10001 }
+  - { path: correlator, owner: 10001, group: 10001 }

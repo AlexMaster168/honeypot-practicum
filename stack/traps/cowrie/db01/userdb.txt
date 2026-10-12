@@ -1,0 +1,2 @@
+# Filled with honeytoken credentials by honeytokens/generate.py (stage 5).
+# Until then nobody gets in.

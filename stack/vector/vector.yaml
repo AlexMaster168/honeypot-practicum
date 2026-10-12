@@ -1,0 +1,160 @@
+# Mirage log pipeline: tail each trap's JSON log, normalise to one ECS-ish schema, ship to ES.
+# Runs as root: OpenCanary's log dir is mode 2770 (not world-traversable).
+data_dir: /var/lib/vector
+
+sources:
+  cowrie:
+    type: file
+    include:
+      - /data/cowrie-web01/log/cowrie/cowrie.json
+      - /data/cowrie-db01/log/cowrie/cowrie.json
+    read_from: beginning
+  opencanary:
+    type: file
+    include: [/data/opencanary/opencanary.json]
+    read_from: beginning
+  dionaea:
+    type: file
+    include: [/data/dionaea/log/dionaea.json]
+    read_from: beginning
+  web:
+    type: file
+    include: [/data/web/web.json]
+    read_from: beginning
+  suricata:
+    type: file
+    include: [/ids/eve.json]
+    read_from: beginning
+
+transforms:
+  # ---- Cowrie: SSH/Telnet. sensor field already tells us the fake host. ----
+  norm_cowrie:
+    type: remap
+    inputs: [cowrie]
+    source: |
+      raw = parse_json!(.message)
+      . = {}
+      .@timestamp = raw.timestamp
+      .event = { "dataset": "cowrie", "action": replace(string!(raw.eventid), "cowrie.", "") }
+      .honeypot = { "name": raw.sensor, "service": "ssh" }
+      .source = { "ip": raw.src_ip, "port": raw.src_port }
+      .destination = { "port": raw.dst_port }
+      .session = { "id": raw.session }
+      .network = { "protocol": raw.protocol }
+      if exists(raw.username) { .user = { "name": raw.username, "password": raw.password } }
+      if raw.eventid == "cowrie.command.input" { .process = { "command_line": raw.input } }
+      .message = raw.message
+      if exists(raw.honeytoken_id) { .honeytoken = {"id": raw.honeytoken_id} }
+
+  # ---- OpenCanary: one container, the port tells us which fake host/service. ----
+  norm_opencanary:
+    type: remap
+    inputs: [opencanary]
+    source: |
+      raw = parse_json!(.message)
+      . = {}
+      .@timestamp = parse_timestamp!(raw.utc_time, "%Y-%m-%d %H:%M:%S%.f")
+      port = int!(raw.dst_port)
+      svc = {"21":"ftp","3306":"mysql","6379":"redis","5900":"vnc","1433":"mssql","3389":"rdp"}
+      host = {"21":"srv-web01","3306":"db-prod01","6379":"db-prod01","5900":"db-prod01","1433":"fs01","3389":"fs01"}
+      key = to_string(port)
+      hp_name = string(get!(host, [key])) ?? "mirage"
+      hp_svc = string(get!(svc, [key])) ?? "unknown"
+      .honeypot = { "name": hp_name, "service": hp_svc }
+      .event = { "dataset": "opencanary", "action": "service-interaction", "code": raw.logtype }
+      .source = { "ip": raw.src_host, "port": raw.src_port }
+      if raw.src_host == "" { del(.source) }
+      .destination = { "port": port }
+      ld = object(raw.logdata) ?? {}
+      uname = ld.USERNAME
+      if uname == null { uname = ld.username }
+      passwd = ld.PASSWORD
+      if passwd == null { passwd = ld.password }
+      if uname != null { .user = { "name": uname, "password": passwd } }
+      .canary = { "logdata": ld }
+      .message = "opencanary " + hp_svc + " interaction from " + to_string!(raw.src_host)
+
+  # ---- Dionaea: SMB/RPC/FTP on fs01 only. ----
+  norm_dionaea:
+    type: remap
+    inputs: [dionaea]
+    source: |
+      raw = parse_json!(.message)
+      . = {}
+      ts = parse_timestamp(raw.timestamp, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp!(raw.timestamp, "%Y-%m-%dT%H:%M:%S")
+      .@timestamp = ts
+      conn = object(raw.connection) ?? {}
+      .honeypot = { "name": "fs01", "service": string(conn.protocol) ?? "unknown" }
+      .event = { "dataset": "dionaea", "action": "connection-" + (string(conn.type) ?? "accept") }
+      .source = { "ip": raw.src_ip, "port": raw.src_port }
+      .destination = { "port": raw.dst_port }
+      .network = { "protocol": conn.protocol, "transport": conn.transport }
+      .message = "dionaea " + (string(conn.protocol) ?? "?") + " " + (string(conn.type) ?? "") + " from " + to_string!(raw.src_ip)
+
+  norm_web:
+    type: remap
+    inputs: [web]
+    source: |
+      raw = parse_json!(.message)
+      . = {}
+      .@timestamp = raw.timestamp
+      .event = {"dataset": "mirage-web", "action": raw.action}
+      .source = {"ip": raw.src_ip}
+      .honeypot = {"name": "srv-web01", "service": "http"}
+      .http = {"request": {"method": raw.method}, "response": {"status_code": raw.status}}
+      .url = {"path": raw.path, "query": raw.query}
+      .tool = {"name": raw.tool, "evidence": "user-agent"}
+      .message = to_string!(raw.path) + " " + to_string!(raw.query)
+      if exists(raw.username) { .user = {"name": raw.username, "password": raw.password} }
+
+  norm_ids:
+    type: remap
+    inputs: [suricata]
+    source: |
+      raw = parse_json!(.message)
+      . = {}
+      .@timestamp = raw.timestamp
+      .event = {"dataset": "suricata", "action": "ids-" + to_string!(raw.event_type)}
+      .source = {"ip": raw.src_ip, "port": raw.src_port}
+      .destination = {"port": raw.dest_port}
+      .honeypot = {"name": "honeynet", "service": "ids"}
+      if exists(raw.alert) { .rule = {"name": raw.alert.signature, "id": raw.alert.signature_id} }
+      if exists(raw.tls) { .tls = raw.tls }
+      .message = encode_json(raw)
+
+sinks:
+  elasticsearch:
+    type: elasticsearch
+    inputs: [norm_cowrie, norm_opencanary, norm_dionaea, norm_web, norm_ids]
+    endpoints: ["http://elasticsearch:9200"]
+    auth:
+      strategy: basic
+      user: vector_writer
+      password: "${VECTOR_PASSWORD}"
+    api_version: v8
+    mode: bulk
+    bulk:
+      index: "mirage-events-%Y.%m.%d"
+    healthcheck:
+      enabled: false
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: block
+  correlator:
+    type: http
+    inputs: [norm_cowrie, norm_opencanary, norm_dionaea, norm_web, norm_ids]
+    uri: http://correlator:8080/ingest
+    auth:
+      strategy: bearer
+      token: "${CORRELATOR_KEY}"
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    batch:
+      max_bytes: 262144
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: block

@@ -1,0 +1,46 @@
+- name: Base packages
+  ansible.builtin.apt:
+    name: [curl, jq, tcpdump, nftables, chrony, ca-certificates, gnupg, python3-debian, git, openssl]
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Timezone UTC
+  ansible.builtin.command: timedatectl set-timezone UTC
+  changed_when: false
+
+- name: Kernel settings
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/60-mirage.conf
+    content: |
+      # Elasticsearch
+      vm.max_map_count = 262144
+      # sshd binds mgmt/NAT addresses before DHCP finishes
+      net.ipv4.ip_nonlocal_bind = 1
+      # no IPv6 on the honeynet, keep the surface small
+      net.ipv6.conf.all.disable_ipv6 = 1
+      net.ipv6.conf.default.disable_ipv6 = 1
+  notify: Reload sysctl
+
+- ansible.builtin.meta: flush_handlers
+
+# Real sshd must never answer on the honeynet: Cowrie owns port 22 there.
+# Ubuntu 24.04 socket-activates sshd and ignores ListenAddress, so switch to the plain service.
+- name: Use ssh.service instead of ssh.socket
+  ansible.builtin.systemd_service:
+    name: ssh.socket
+    enabled: false
+    state: stopped
+
+- name: sshd hardening + listen on mgmt/NAT only
+  ansible.builtin.template:
+    src: sshd_mirage.conf.j2
+    dest: /etc/ssh/sshd_config.d/10-mirage.conf
+    mode: "0644"
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Restart sshd
+
+- name: sshd enabled
+  ansible.builtin.systemd_service:
+    name: ssh.service
+    enabled: true
+    state: started

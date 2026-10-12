@@ -1,0 +1,60 @@
+# Runs after the stack is up. The index template is applied by the es-init container;
+# here we just load Kibana's data view + dashboard once Kibana reports available.
+- name: Load management credentials
+  ansible.builtin.slurp:
+    src: /opt/mirage/stack/.env
+  register: elastic_secrets
+  no_log: true
+
+- name: Set management password
+  ansible.builtin.set_fact:
+    elastic_password: "{{ ((elastic_secrets.content | b64decode).splitlines() | select('match', '^ELASTIC_PASSWORD=') | first).split('=')[1] }}"
+  no_log: true
+
+- name: Wait for Kibana to be available
+  ansible.builtin.uri:
+    url: http://192.168.56.10:5601/api/status
+    return_content: true
+    url_username: elastic
+    url_password: "{{ elastic_password }}"
+    force_basic_auth: true
+  register: kb
+  until: kb.status == 200 and (kb.json.status.overall.level | default('')) == 'available'
+  retries: 40
+  delay: 10
+
+- name: Read saved-object checksum
+  ansible.builtin.stat:
+    path: "{{ stack_dir }}/elastic/kibana-export.ndjson"
+    checksum_algorithm: sha256
+  register: kb_export
+
+- name: Read last imported checksum
+  ansible.builtin.command: cat /opt/mirage/kibana-import.sha256
+  register: kb_previous
+  changed_when: false
+  failed_when: false
+
+- name: Import Kibana saved objects (data view + dashboard)
+  ansible.builtin.shell:
+    cmd: |
+      set -a
+      . /opt/mirage/stack/.env
+      set +a
+      curl -fsS -u "elastic:$ELASTIC_PASSWORD" -X POST "http://192.168.56.10:5601/api/saved_objects/_import?overwrite=true" -H "kbn-xsrf: true" --form file=@{{ stack_dir }}/elastic/kibana-export.ndjson
+  register: kb_import
+  changed_when: "'\"success\":true' in kb_import.stdout"
+  failed_when: kb_import.rc != 0 or not (kb_import.stdout | from_json).success
+  when: kb_previous.stdout != kb_export.stat.checksum
+
+- name: Save successfully imported checksum
+  ansible.builtin.copy:
+    dest: /opt/mirage/kibana-import.sha256
+    content: "{{ kb_export.stat.checksum }}"
+    mode: "0644"
+  when: kb_import is not skipped
+
+- name: Show import result
+  ansible.builtin.debug:
+    msg: "{{ kb_import.stdout }}"
+  when: kb_import is not skipped

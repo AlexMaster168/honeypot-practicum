@@ -1,0 +1,24 @@
+# Vagrant leaves the honeynet NIC unconfigured (auto_config: false); we own it entirely.
+- name: Honeynet NIC with one address per fake server
+  ansible.builtin.copy:
+    dest: /etc/netplan/60-honeynet.yaml
+    mode: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          honeynet:
+            match:
+              macaddress: "{{ honeynet_mac }}"
+            set-name: honeynet
+            dhcp4: false
+            dhcp6: false
+            accept-ra: false
+            link-local: []
+            addresses:
+      {% for name, ip in honeynet_hosts.items() %}
+              - {{ ip }}/24  # {{ name }}
+      {% endfor %}
+  notify: Apply netplan
+
+- ansible.builtin.meta: flush_handlers

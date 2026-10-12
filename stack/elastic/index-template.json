@@ -1,0 +1,33 @@
+{
+  "index_patterns": ["mirage-events-*"],
+  "priority": 200,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "2s"
+    },
+    "mappings": {
+      "dynamic_templates": [
+        { "strings_as_keyword": { "match_mapping_type": "string", "mapping": { "type": "keyword", "ignore_above": 2048 } } }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "message":    { "type": "text" },
+        "source":      { "properties": { "ip": { "type": "ip" }, "port": { "type": "integer" } } },
+        "destination": { "properties": { "port": { "type": "integer" } } },
+        "event":       { "properties": {
+          "dataset": { "type": "keyword" }, "action": { "type": "keyword" }, "code": { "type": "keyword" } } },
+        "honeypot":    { "properties": {
+          "name": { "type": "keyword" }, "service": { "type": "keyword" } } },
+        "user":        { "properties": {
+          "name": { "type": "keyword" }, "password": { "type": "keyword" } } },
+        "network":     { "properties": {
+          "protocol": { "type": "keyword" }, "transport": { "type": "keyword" } } },
+        "process":     { "properties": {
+          "command_line": { "type": "keyword", "ignore_above": 8192, "fields": { "text": { "type": "text" } } } } },
+        "session":     { "properties": { "id": { "type": "keyword" } } }
+      }
+    }
+  }
+}

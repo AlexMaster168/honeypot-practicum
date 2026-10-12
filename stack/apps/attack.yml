@@ -1,0 +1,8 @@
+# Candidate techniques inferred from observable traffic, not proof of compromise.
+commands:
+  - {id: T1082, name: System information discovery, pattern: '(hostname|uname|/etc/os-release|\bid\b)'}
+  - {id: T1083, name: File and directory discovery, pattern: '(\bls\b|\bfind\b|\bpwd\b)'}
+  - {id: T1057, name: Process discovery, pattern: '(\bps\b|\btop\b)'}
+  - {id: T1552.001, name: Credentials in files, pattern: '(\.env|bash_history|id_rsa|id_ed25519)'}
+  - {id: T1105, name: Ingress tool transfer attempt, pattern: '(\bwget\b|\bcurl\b|\btftp\b)'}
+  - {id: T1041, name: Exfiltration attempt, pattern: '(curl.*(-T|--upload-file)|scp.*customers|POST.*customers)'}

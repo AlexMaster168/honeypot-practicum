@@ -1,0 +1,64 @@
+#!/usr/sbin/nft -f
+# Managed by ansible (mirage).
+#
+# Lives next to Docker's iptables-nft tables. A packet has to pass every base chain on a hook,
+# so a drop here wins even when Docker's chains accept it.
+#
+#   honeynet -> host itself       : ping only (real services are invisible)
+#   honeynet -> traps (DNAT'd)    : allowed, Docker publishes trap ports on 10.66.0.x
+#   containers -> anywhere new    : dropped (no egress for compromised traps)
+#   mgmt -> host                  : ssh, Kibana, correlator UI
+
+table inet mirage
+delete table inet mirage
+
+table inet mirage {
+    set mgmt_tcp {
+        type inet_service
+        elements = { {{ mgmt_tcp_ports | join(', ') }} }
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iif lo accept
+        ct state invalid drop
+        ct state established,related accept
+
+        # honeynet: look alive, expose nothing real
+        iifname "honeynet" icmp type echo-request limit rate 50/second accept
+        iifname "honeynet" counter drop
+
+        # vagrant ssh through VirtualBox NAT
+        ip daddr {{ nat_ip }} tcp dport 22 accept
+
+        ip saddr {{ mgmt_cidr }} ip daddr {{ mgmt_ip }} tcp dport @mgmt_tcp accept
+        ip saddr {{ mgmt_cidr }} icmp type echo-request accept
+
+        # DHCP on the NAT NIC
+        udp sport 67 udp dport 68 accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        ct state invalid drop
+        ct state established,related accept
+
+        # attackers to published traps (Docker DNAT'd them to a container)
+        iifname "honeynet" oifname { "docker0", "br-*" } ct status dnat accept
+        # management to Kibana/correlator containers
+        ip saddr {{ mgmt_cidr }} oifname { "docker0", "br-*" } ct status dnat accept
+        # container <-> container; cross-bridge traffic is still cut by Docker's isolation chains
+        iifname { "docker0", "br-*" } oifname { "docker0", "br-*" } accept
+
+        # everything else: containers going out, honeynet routing anywhere
+        counter drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+        # host never initiates traffic into the honeynet
+        oifname "honeynet" ct state new counter drop
+    }
+}

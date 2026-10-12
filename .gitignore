@@ -1,0 +1,11 @@
+.vagrant/
+*.log
+__pycache__/
+.venv/
+# generated honeytoken values and captured payloads never go to git
+honeytokens/registry.yml
+captures/
+.scratch/
+.pytest_cache/
+stack/seeds/
+stack/.env
