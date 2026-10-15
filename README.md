@@ -1,217 +1,52 @@
-# Mirage — honeynet в VirtualBox
+# Mirage — учебная honeynet в VirtualBox
 
-Изолированная лаба: VM `mirage` изображает маленькую корпоративную сеть из трёх серверов. Kali атакует её из internal-сети `honeynet`.
+Изолированный стенд для изучения атак и защитной телеметрии. Одна VM изображает три сервера корпоративной сети, Kali выполняет учебный сценарий, а ловушки записывают обращения, попытки входа и команды. Elasticsearch хранит события, Kibana показывает сводную картину, коррелятор строит таймлайн и отмечает предполагаемые техники MITRE ATT&CK.
 
-```
+## Возможности
+
+- SSH-ловушки Cowrie с эмулируемой файловой системой и записями сессий.
+- FTP, MariaDB, Redis, VNC, MSSQL и RDP на OpenCanary; SMB и RPC на Dionaea.
+- Веб-портал на FastAPI за nginx с учебными утечками, HTTP/S и распознаванием маркеров сканеров.
+- Уникальные honeytokens для отслеживания использования найденных паролей и deploy-ключа.
+- Suricata, общая схема событий в Vector и дашборд Kibana с панелями IDS, JA3 и сканеров.
+- Коррелятор с алертами, графом переходов между хостами и матрицей ATT&CK: 24 техники в каталоге, 17 правил для команд.
+- Автоматическая настройка через Vagrant и Ansible, учебный сценарий и проверки в GitHub Actions.
+
+## Дашборды
+
+### Kibana: обзор событий
+
+Дашборд **Mirage — Attack Overview** объединяет события всех источников: распределение по хостам, временную последовательность, IP источников, попытки входа, сервисы и команды SSH. Дополнительные панели показывают сигнатуры Suricata, TLS JA3 и имена инструментов, определённые по User-Agent.
+
+![Kibana: события ловушек, IDS, JA3 и сканеры](docs/screenshots/stage3-kibana-dashboard.png)
+
+Снимок сделан в Elasticsearch и Kibana 8.15.3 с шаблонами этого репозитория. Для демонстрации панелей загружена репрезентативная учебная кампания: 388 событий с источником `10.66.0.50`. Это демонстрационный набор данных; снимок не является результатом повторного сквозного прогона последней версии стенда.
+
+### Коррелятор: алерты и связи между хостами
+
+Вверху страницы собраны алерты об использовании honeytokens. Граф показывает связи источника с хостами, а матрица ATT&CK выделяет техники, для которых найдены соответствующие события. Служебные источники вне `10.66.0.0/24` исключаются из кампаний.
+
+![Коррелятор: алерты, граф переходов и матрица ATT&CK](docs/screenshots/stage7-correlator.png)
+
+### Таймлайн кампании
+
+Для каждой кампании можно раскрыть последовательность событий: время, хост, действие, команду и предполагаемую технику ATT&CK. Это позволяет сопоставить вход в SSH, чтение приманки и последующее применение найденных учётных данных.
+
+![Таймлайн кампании с разметкой ATT&CK](docs/screenshots/stage9-timeline.png)
+
+## Архитектура
+
+```text
 Windows host
- ├─ host-only 192.168.56.0/24   management: ssh, Kibana :5601, correlator UI :8088
- └─ intnet "honeynet" 10.66.0.0/24 (нет шлюза, нет интернета)
-      ├─ Kali       10.66.0.50
-      └─ mirage     10.66.0.10 srv-web01 · 10.66.0.20 db-prod01 · 10.66.0.30 fs01
+ ├─ host-only 192.168.56.0/24  → управление: SSH, Kibana :5601, коррелятор :8088
+ └─ internal "honeynet" 10.66.0.0/24
+      ├─ Kali    10.66.0.50
+      └─ mirage  10.66.0.10 srv-web01
+                 10.66.0.20 db-prod01
+                 10.66.0.30 fs01
 ```
 
-## Фейковые серверы
-
-| Хост | Изображает | Порт | Ловушка |
-|---|---|---|---|
-| `10.66.0.10` srv-web01 | Debian 12, веб-сервер | 22 ssh | Cowrie: пускает по слабым паролям (`root:123456`, …) |
-| | | 21 ftp | OpenCanary (vsFTPd 3.0.3) |
-| `10.66.0.20` db-prod01 | Debian 12, БД | 22 ssh | Cowrie: пускает **только** по утёкшим кредам (honeytokens, этап 5) |
-| | | 3306 mysql | OpenCanary (MariaDB 10.11.6) |
-| | | 6379 redis, 5900 vnc | OpenCanary |
-| `10.66.0.30` fs01 | Windows Server 2008 R2, файлопомойка | 445 smb, 135 rpc, 21 ftp | Dionaea: эмулирует уязвимости, ловит payload'ы |
-| | | 1433 mssql, 3389 rdp | OpenCanary (SQL Server 2014) |
-
-### Как это видит атакующий
-
-![nmap по трём хостам](docs/screenshots/stage2-nmap.png)
-
-Брутфорс web01 находит слабый пароль, и атакующий попадает в «настоящий» Debian:
-
-![hydra](docs/screenshots/stage2-hydra.png)
-![ssh в srv-web01](docs/screenshots/stage2-ssh-web01.png)
-
-На db-prod01 те же креды не подходят. Внутрь можно попасть только через то, что найдёшь на web01:
-
-![ssh в db-prod01](docs/screenshots/stage2-ssh-db01.png)
-
-Шары на fs01 и баннеры остальных сервисов:
-
-![smbclient](docs/screenshots/stage2-smb.png)
-![redis / mysql / vnc](docs/screenshots/stage2-misc.png)
-
-### Что при этом записали ловушки
-
-У каждого события сохраняется настоящий IP атакующего: Docker настроен с `userland-proxy: false`, и адрес источника не теряется.
-
-![события по ловушкам](docs/screenshots/stage2-trap-events.png)
-
-## Запуск
-
-Нужны VirtualBox 7.x и Vagrant 2.4+.
-
-```powershell
-# 1. Kali (выключенная) получает NIC2 в сети honeynet
-.\scripts\vbox-kali-attach.ps1
-
-# 2. Поднять и запровижинить mirage (инфра + ловушки)
-vagrant up
-```
-
-Внутри Kali:
-
-```bash
-sudo ./attacker/setup-net.sh          # eth1 -> 10.66.0.50/24
-```
-
-После изменений в `provision/` или `stack/` повторно применить: `vagrant provision --provision-with ansible`.
-
-### Lab mode (перед атаками обязательно)
-
-```powershell
-.\scripts\lab-mode.ps1 on    # у Kali отключается NAT, она видит только honeynet
-.\scripts\lab-mode.ps1 off   # вернуть Kali интернет (обновления, тулзы)
-```
-
-Зачем: с включённым NAT Kali попадает в management-сеть через Windows-хост (NAT → хост → host-only). Пакеты приходят с адресом `192.168.56.1`, и файрвол mirage не может отличить их от админа.
-
-### Smoke-тест
-
-```powershell
-.\scripts\lab-mode.ps1 on
-.\scripts\kali-run.ps1 attacker\stage2-smoke.sh -Extra attacker\wordlists -Sudo > capture.txt
-vagrant ssh -c "bash /vagrant/scripts/trap-events.sh"      # что увидели ловушки
-python scripts\termshot.py capture.txt docs\screenshots --prefix stage2   # перегенерировать скрины
-```
-
-`kali-run.ps1` копирует скрипт в Kali и запускает его через guest additions. Шелл-код через аргументы PowerShell 5.1 не передаётся: тот портит кавычки.
-
-## Изоляция
-
-- Трафик из honeynet доходит только до опубликованных портов ловушек (Docker DNAT). Реальные сервисы хоста отвечают на этой сети только на ping.
-- Контейнеры не могут открывать новые соединения наружу: nftables `inet mirage`, цепочка forward.
-- У каждой ловушки свой bridge с `enable_icc=false`, поэтому взломанная ловушка не достанет соседей.
-- Ловушки работают с read-only корнем, `cap_drop: ALL` и лимитами по CPU, памяти и pid.
-- Всё, что пишут ловушки (логи, скачанные бинари, tty-записи), лежит в `/srv/mirage/data`, смонтированном с `noexec,nosuid,nodev`.
-- Хост сам не открывает соединения в honeynet.
-- Настоящий sshd слушает только NAT (`vagrant ssh`) и `192.168.56.10`.
-
-Проверка `scripts/check-isolation.sh`: из каждой сети ловушек пробуем достучаться до интернета, соседней ловушки и mgmt. Первая строка — положительный контроль: она доказывает, что сама проба умеет видеть открытый порт.
-
-![изоляция](docs/screenshots/stage2-isolation.png)
-
-## Грабли, на которые наступили
-
-- **`nmap -sV` палит Cowrie telnet** и прямо пишет `Cowrie Honeypot telnetd`. Telnet на web01 выключен, SSH-баннер Cowrie nmap не распознаёт.
-- **Dionaea падает с segfault от одного не-ASCII символа** (длинное тире в комментарии) в `services/*.yaml`. Поэтому конфиги ловушек только в ASCII.
-- **OpenCanary**: MySQL-баннер обязан начинаться с цифры 3–6, а MSSQL знает только версии 2008R2/2012/2014. Отсюда MariaDB-баннер `5.5.5-10.11.6-MariaDB` (именно так его отдаёт настоящая MariaDB) и перенос MSSQL на Windows-хост, где он и должен жить.
-- **В read-only контейнере twistd** (OpenCanary) не может записать pid-файл, поэтому под `/run` подложен tmpfs.
-
-## Этап 3: единое хранилище и Kibana
-
-Vector читает JSON-логи ловушек и `eve.json` Suricata, нормализует в одну
-ECS-подобную схему и шлёт в Elasticsearch. Общие поля: `@timestamp`,
-`event.dataset`, `event.action`, `source.ip`, `honeypot.name`,
-`honeypot.service`, `user.name`, `user.password`, `process.command_line`,
-`session.id`. Служебные записи OpenCanary без IP отображаются как `mirage/unknown`.
-
-Дашборд **Mirage — Attack Overview** (с Windows-хоста:
-`http://192.168.56.10:5601`, вход `elastic` / пароль из `.env`) показывает число
-событий, распределение по фейковым хостам, таймлайн по типу ловушки, топ IP
-атакующих, перебираемые креды, целевые сервисы, команды в SSH, а также
-сигнатуры IDS (Suricata), **TLS JA3-фингерпринты** и обнаруженные сканеры.
-Дата хранится в UTC. `source.ip` смаплен как тип `ip`
-(шаблон `stack/elastic/index-template.json` применяется контейнером `es-init`
-до первой записи Vector).
-
-![Kibana — Attack Overview](docs/screenshots/stage3-kibana-dashboard.png)
-
-> Дашборд собран из того же `stack/elastic/index-template.json` и
-> `kibana-export.ndjson` этого репозитория (Elasticsearch + Kibana 8.15.3),
-> накачанных репрезентативной кампанией одной атаки (388 событий, источник
-> `10.66.0.50`). Внизу — три панели v2: сигнатуры IDS (Suricata), TLS
-> JA3-фингерпринты и сканеры по User-Agent.
-
-**Security включён** (это закрывает ограничение из старого плана): ES требует
-аутентификации, у Kibana/Vector/correlator свои пользователи. Пароли и ключи
-генерит `scripts/generate-secrets.py` в `/opt/mirage/stack/.env` (root, 0600),
-в git они не попадают. Elasticsearch порт на VM не публикует — доступ только
-изнутри сети `obs`; из всех сетей ловушек 9200 заблокирован.
-
-Проверить сбор логов внутри mirage:
-
-```bash
-bash /vagrant/scripts/check-observability.sh
-```
-
-## Этап 4–6: веб-ловушка, honeytokens, IDS
-
-- **srv-web01:80/443** — FastAPI-портал `stack/apps/web.py` за nginx (`web-proxy`,
-  TLS на 443). Светит `/.env`, `/.git/` (в истории коммитов лежит deploy-ключ),
-  распознаёт тулзы по User-Agent (gobuster/sqlmap/nikto), отдаёт правдоподобные
-  приманки. Логи уходят в общую схему как любой другой источник.
-- **Honeytokens** (`honeytokens/generate.py`): четыре уникальных токена T1–T4
-  раскиданы так, что образуют цепочку lateral movement:
-  `~/.bash_history` и `/var/www/.env` на web01 → пароль backup и deploy-ключ →
-  вход на **db-prod01** (Cowrie db01 пускает **только** по ним). Реестр —
-  `/opt/mirage/stack/seeds/registry.yml`. Уникальность значений позволяет
-  correlator'у точно сказать, какой токен и откуда засветился.
-- **Suricata** слушает honeynet-интерфейс, пишет `eve.json`; Vector добавляет
-  его в ES как `event.dataset: suricata` (на дашборде сервис `ids`).
-
-## Этап 7–8: correlator и сквозная атака
-
-`correlator` (`stack/apps/correlator.py`, UI на `192.168.56.10:8088`, Basic-auth
-`analyst` / `CORRELATOR_KEY`) склеивает события по IP источника в «кампании»
-(окно 30 минут) и размечает техники **MITRE ATT&CK** по каталогу
-`stack/apps/attack.yml` (24 техники, 17 правил на команды). Источники вне
-honeynet (NAT-адрес VM, link-local IPv6) отбрасываются — в таймлайне только
-атаки, без фонового шума.
-
-UI состоит из трёх блоков:
-
-- **⚠ Алерты** — `credential-reuse`, когда honeytoken засветился не там, где был
-  подкинут; уникальность токена указывает точный источник утечки. Те же алерты
-  отдаёт `GET /api/alerts`, а при заданном `ALERT_WEBHOOK` — пушатся наружу
-  (в изолированной лабе no-op).
-- **Боковое перемещение** — граф: атакующий → хост входа → цели, куда дошли по
-  украденным кредам.
-- **ATT&CK · покрытие** — матрица тактик; наблюдавшиеся техники подсвечены.
-
-![correlator — алерты, граф и ATT&CK-матрица](docs/screenshots/stage7-correlator.png)
-
-Полный прогон kill chain одной командой (lab mode должен быть включён):
-
-```powershell
-.\scripts\lab-mode.ps1 on
-.\scripts\kali-run.ps1 attacker\run-all.sh          # recon → брут → токены → lateral → persistence → SMB
-vagrant ssh -c "sudo python3 /vagrant/tests/e2e/check_campaign.py"
-```
-
-`run-all.sh` проходит recon → веб-пробы (вкл. TLS для JA3) → брут SSH → discovery
-и чтение токена → lateral SSH по паролю backup → git deploy-key → глубокая
-разведка, persistence и defense evasion → эмуляция эксфила → SMB.
-`check_campaign.py` требует кампанию с ≥8 техниками ATT&CK и алертом
-credential-reuse и проверяет, что она лежит в Elasticsearch.
-
-Логика correlator (правила ATT&CK, фильтр шума, алерты, граф) и веб-ловушка
-покрыты юнит-тестами `stack/apps/tests`, которые гоняет CI
-([.github/workflows/ci.yml](.github/workflows/ci.yml)) на каждый push.
-Последний сквозной прогон на живом стенде (до этой доработки) дал кампанию
-`10.66.0.50` с 11 техниками и 2 алертами credential-reuse, `check_campaign.py`
-→ **PASS**; расширенный `run-all.sh` покрывает ~20 техник (см. скриншот выше).
-
-Скриншоты correlator и Kibana пересобираются с хоста:
-
-```powershell
-$env:ELASTIC_PASSWORD="..."; $env:CORRELATOR_KEY="..."   # из /opt/mirage/stack/.env
-python scripts\shots.py                 # все; или: python scripts\shots.py correlator timeline
-```
-
-## Этап 9: разбор атаки (отчёт)
-
-Границы доверия и устройство сети подробно — в [docs/architecture.md](docs/architecture.md).
-Схема потоков данных:
+Три адреса серверов — IP-алиасы одной VM. Отдельные Docker bridges разделяют ловушки. NAT у mirage используется для установки пакетов и загрузки образов; исходящие соединения контейнеров блокируются. Перед атаками NAT у Kali отключается режимом `lab-mode`.
 
 ```mermaid
 flowchart LR
@@ -222,77 +57,207 @@ flowchart LR
   Web & DB & FS -->|JSON-логи через bind mount| Vector
   Vector --> ES["Elasticsearch · внутренний bridge"]
   Vector --> Correlator["Коррелятор · SQLite + ATT&CK"]
-  Correlator -->|сводки кампаний| ES
+  Correlator -->|Сводки кампаний| ES
   ES --> Kibana["Kibana · :5601"]
   Correlator --> UI["Таймлайн · :8088"]
 ```
 
-### Что сделал атакующий
+Подробное описание границ доверия — в [docs/architecture.md](docs/architecture.md).
 
-Один прогон `attacker/run-all.sh` с Kali — полная цепочка от скана до SMB:
+### Сервисы-приманки
 
-![kill chain со стороны Kali](docs/screenshots/stage9-killchain.png)
-
-### Как это выглядит у защитника
-
-Коррелятор склеил все события в одну кампанию и разметил каждое по
-MITRE ATT&CK. Видна точная последовательность: скан → веб-пробы → брут →
-успешный вход → discovery → чтение файла с токеном → переход на db-prod01
-по украденным кредам → закрепление и сокрытие следов → эмуляция эксфила →
-SMB на fs01.
-
-![таймлайн кампании с разметкой ATT&CK](docs/screenshots/stage9-timeline.png)
-
-| Этап kill chain | Хост | Действие | ATT&CK |
+| Хост | Образ сервера | Сервисы | Реализация |
 |---|---|---|---|
-| Разведка | все три | `nmap -sS -sV` по портам | фиксирует Suricata (`ids`) |
-| Доступ к веб-приложению | srv-web01 | запросы `/.env`, `/.git/`, SQLi-проба, тулзы по User-Agent | T1190 |
-| Подбор пароля SSH | srv-web01 | перебор → `root:123456` | T1110 |
-| Валидная учётка | srv-web01 | успешный вход | T1078 |
-| Разведка на хосте | srv-web01 | `hostname; uname; id; ps; ls` | T1082, T1083, T1057 |
-| Поиск кредов в файлах | srv-web01 | `cat /var/www/.env`, `/root/.bash_history` | T1552.001 |
-| Боковое перемещение (SSH) | db-prod01 | вход по паролю `backup` и по deploy-ключу | T1021.004, T1078 |
-| Разведка на БД | db-prod01 | `cat customers.csv`, `README.txt` | T1082, T1083 |
-| Разведка сети/аккаунтов | srv-web01 | `netstat`, `ss`, `ip addr`, `getent passwd`, `last` | T1016, T1049, T1033, T1087 |
-| Закрепление | srv-web01 | `crontab`, `>> authorized_keys` | T1053.003, T1098.004 |
-| Эскалация и сокрытие | srv-web01 | `sudo`, `iptables -F`, `history -c` | T1548.003, T1562.004, T1070.003 |
-| Перенос/эксфильтрация | srv-web01 | `wget` / `curl -T` (эмуляция) | T1105, T1041 |
-| Боковое перемещение (SMB) | fs01 | подключение к шарам | T1021.002 |
+| `10.66.0.10` — srv-web01 | Debian 12, веб-сервер | SSH 22, FTP 21, HTTP 80, HTTPS 443 | Cowrie, OpenCanary, FastAPI, nginx |
+| `10.66.0.20` — db-prod01 | Debian 12, сервер БД | SSH 22, MariaDB 3306, Redis 6379, VNC 5900 | Cowrie, OpenCanary |
+| `10.66.0.30` — fs01 | Windows Server 2008 R2 | FTP 21, RPC 135, SMB 445, MSSQL 1433, RDP 3389 | Dionaea, OpenCanary |
 
-**Ключевой сигнал — credential reuse.** Каждый honeytoken уникален, поэтому
-коррелятор точно говорит, какой секрет и откуда утёк: в этой кампании
-два алерта — токен **T1** (пароль backup из `~/.bash_history`) и токен **T4**
-(deploy-ключ из git-истории), оба применены на **db-prod01**. Именно это,
-а не сам факт входа, доказывает боковое перемещение.
+На web01 предусмотрены слабые учебные пароли. На db-prod01 вход разрешён по заданному паролю backup и deploy-ключу из приманок. Все данные, ключи и учётные записи предназначены только для стенда.
 
-Сводная картина по всем источникам — на дашборде Kibana (см. выше):
-топ IP атакующих, перебираемые пароли, целевые сервисы, команды в SSH.
+## Запуск
 
-### Честные оговорки
+Нужны VirtualBox 7.x, Vagrant 2.4+ и Kali VM. Конфигурация mirage выделяет 8 ГБ RAM и 4 vCPU. Имя Kali по умолчанию: `kali-linux-2025.4-virtualbox-amd64`.
 
-- Кампания группируется по IP + 30-минутному окну: общий NAT может слить
-  несколько атакующих, смена IP — разорвать один сценарий.
-- Метка ATT&CK — это **гипотеза** по наблюдаемому действию. Запись SMB не
-  доказывает успешный lateral movement; `curl -T` в Cowrie не доказывает
-  реальную отправку данных.
-- Имя инструмента определяется по User-Agent, а его легко подделать.
-- Коррелятор берёт только источники из honeynet `10.66.0.0/24`; служебный
-  трафик VM (NAT-адрес, link-local IPv6) в кампании не попадает. В Kibana же
-  видны все события — там фильтруй по `source.ip` при разборе.
+Сначала штатно выключить Kali, затем выполнить на Windows-хосте из каталога проекта:
 
-## Структура
+```powershell
+.\scripts\vbox-kali-attach.ps1
+vagrant up
+```
 
-| Путь | Что |
+Внутри Kali настроить второй сетевой интерфейс:
+
+```bash
+sudo ./attacker/setup-net.sh  # eth1 → 10.66.0.50/24, без шлюза
+```
+
+После изменений в конфигурации:
+
+```powershell
+vagrant provision --provision-with ansible
+```
+
+### Доступ к аналитике
+
+| Интерфейс | Адрес с Windows-хоста | Вход |
+|---|---|---|
+| Kibana | `http://192.168.56.10:5601` | `elastic` и `ELASTIC_PASSWORD` |
+| Коррелятор | `http://192.168.56.10:8088` | `analyst` и `CORRELATOR_KEY` |
+| Администрирование VM | `vagrant ssh` | SSH-ключ Vagrant |
+
+Секреты создаёт `scripts/generate-secrets.py` в `/opt/mirage/stack/.env` с правами `0600`. Файл доступен администратору внутри VM и исключён из Git. Elasticsearch не публикует порт на VM; доступ к нему требует аутентификации.
+
+### Изолированный режим Kali
+
+```powershell
+.\scripts\lab-mode.ps1 on   # отключить NAT перед сценарием
+.\scripts\lab-mode.ps1 off  # вернуть NAT после проверки
+```
+
+С включённым NAT Kali может достичь management-сети через Windows-хост. На стороне mirage такое соединение выглядит как обращение с адреса хоста `192.168.56.1`, поэтому для учебной атаки требуется `lab-mode on`.
+
+### Автоматический запуск и проверка
+
+```powershell
+.\scripts\rebuild-and-verify.ps1
+# Для уже поднятой VM:
+.\scripts\rebuild-and-verify.ps1 -SkipVagrantUp
+```
+
+Скрипт поднимает стенд, подключает и запускает Kali, настраивает сеть, включает изоляцию, выполняет сценарий и проверяет кампанию. Kali должна быть выключена заранее: принудительное выключение не выполняется. При ошибке проверяемого этапа скрипт останавливается; после выполнения сценария NAT возвращается через `finally`.
+
+Предварительная проверка VBS читает состояние Windows и останавливает запуск при несовместимой конфигурации или неопределённом результате. Настройки защиты Windows скрипт не меняет.
+
+## Учебный сценарий
+
+`attacker/run-all.sh` выполняет разведку, веб-пробы, подбор пароля SSH, discovery-команды, чтение приманок, вход на db-prod01 по паролю и ключу, эмуляцию закрепления и эксфильтрации, затем обращения к SMB.
+
+```powershell
+.\scripts\lab-mode.ps1 on
+try {
+    .\scripts\kali-run.ps1 attacker\run-all.sh -Sudo
+    vagrant ssh -c "sudo python3 /vagrant/tests/e2e/check_campaign.py"
+} finally {
+    .\scripts\lab-mode.ps1 off
+}
+```
+
+![Учебный сценарий со стороны Kali](docs/screenshots/stage9-killchain.png)
+
+| Шаг | Наблюдаемое действие | Предполагаемые техники |
+|---|---|---|
+| Разведка | Сканирование сервисов, сигнатуры IDS | T1046 |
+| Веб-пробы | SQLi-паттерны и запросы к приманкам | T1190, T1552.001 |
+| Подбор пароля и вход | Неудачные попытки, затем успешный вход | T1110, T1078 |
+| Разведка на хосте | `hostname`, `uname`, `id`, `ps`, `ls` | T1082, T1083, T1057 |
+| Поиск учётных данных | Чтение `.env` и `.bash_history` | T1552.001 |
+| Переход на db-prod01 | Использование пароля backup и deploy-ключа | T1021.004, T1078 |
+| Разведка сети и аккаунтов | `ip`, `netstat`, `ss`, `getent`, `last` | T1016, T1049, T1033, T1087 |
+| Эмуляция закрепления | `crontab`, запись в `authorized_keys` | T1053.003, T1098.004 |
+| Эмуляция сокрытия следов | `sudo`, `iptables -F`, `history -c` | T1548.003, T1562.004, T1070.003 |
+| Перенос и эксфильтрация | Команды `wget` и `curl -T` внутри эмуляции | T1105, T1041 |
+| SMB | Обращение к файловому серверу | T1021.002 |
+
+### Honeytokens и credential reuse
+
+Генератор `honeytokens/generate.py` создаёт токены T1–T4 и размещает их в эмулируемой файловой системе и веб-приманках. История Git содержит учебный deploy-ключ. Реестр находится в `/opt/mirage/stack/seeds/registry.yml`.
+
+Уникальные значения связывают последующее применение секрета с местом его размещения. В ранее проверенном сценарии были зарегистрированы два алерта `credential-reuse`: T1 из истории команд и T4 из истории Git, оба на db-prod01. Вместе с успешным входом это показывает переход между эмулируемыми хостами в рамках сценария.
+
+## Снимки проверок сервисов
+
+Терминальные изображения ниже отрисованы из сохранённого вывода команд. Скриншоты Kibana и коррелятора выше — снимки веб-интерфейсов.
+
+### Разведка
+
+Nmap видит разные наборы сервисов на трёх адресах. Снимок относится к раннему этапу настройки, до добавления HTTP/S.
+
+![Nmap: сервисы на трёх адресах](docs/screenshots/stage2-nmap.png)
+
+### Доступ по SSH
+
+Перебор на web01 находит предусмотренный учебный пароль. Cowrie возвращает имя хоста, пользователя и сведения об ОС из эмуляции.
+
+![Результат подбора учебного пароля](docs/screenshots/stage2-hydra.png)
+
+![SSH-сессия в эмулируемом srv-web01](docs/screenshots/stage2-ssh-web01.png)
+
+Тот же пароль на db-prod01 отвергается:
+
+![Отказ во входе на db-prod01](docs/screenshots/stage2-ssh-db01.png)
+
+### Остальные сервисы и журналирование
+
+SMB перечисляет учебные шары; Redis, MariaDB и VNC отвечают своими протокольными баннерами.
+
+![Перечисление SMB-шар](docs/screenshots/stage2-smb.png)
+
+![Ответы Redis, MariaDB и VNC](docs/screenshots/stage2-misc.png)
+
+Ловушки сохраняют адрес источника `10.66.0.50`. Настройка Docker `userland-proxy: false` позволяет не подменять его адресом прокси.
+
+![События, записанные ловушками](docs/screenshots/stage2-trap-events.png)
+
+## Изоляция
+
+- Входящий трафик honeynet достигает опубликованных портов ловушек; административный SSH слушает NAT и management-адрес.
+- nftables блокирует новые исходящие соединения контейнеров в интернет и management-сеть.
+- Ловушки разделены Docker bridges. nginx и веб-приложение используют общий bridge для связи прокси с backend.
+- Контейнеры ловушек используют read-only корень, ограничения ресурсов и минимально необходимые capabilities. Исключения для конкретных образов указаны в Compose.
+- Записанные файлы и журналы находятся в `/srv/mirage/data` на mount с `noexec,nosuid,nodev`; скачанные файлы автоматически не запускаются.
+
+`scripts/check-isolation.sh` проверяет доступ к интернету, соседней ловушке и management-адресу. Положительный контроль подтверждает, что проба умеет обнаруживать открытый порт.
+
+![Проверка сетевой изоляции с положительным контролем](docs/screenshots/stage2-isolation.png)
+
+## Проверки и ограничения
+
+На 16 октября 2026 года локально прошли **12 юнит-тестов**; синтаксис `rebuild-and-verify.ps1` проверен. GitHub Actions запускает тесты, проверяет ATT&CK-правила, генерацию saved objects Kibana и синтаксис shell-скриптов.
+
+```powershell
+python -m pytest stack/apps/tests -q
+```
+
+Последний ранее выполненный сквозной прогон дал кампанию с 11 техниками и двумя алертами `credential-reuse`. Проверка `tests/e2e/check_campaign.py` требует минимум восемь техник, алерт повторного использования секрета и сохранённую сводку в Elasticsearch. Полная пересборка и повторный сквозной прогон расширенного сценария после последних изменений ещё не подтверждены.
+
+При интерпретации результатов учитывать:
+
+- Кампании группируются по IP и получасовому окну. Общий NAT может объединить источники, а смена адреса или граница окна — разделить сценарий.
+- Метка ATT&CK отражает гипотезу по событию. Обращение к SMB не доказывает успешного входа, команда в Cowrie не означает её выполнение на настоящем хосте.
+- User-Agent можно подделать: имя инструмента обозначает наблюдаемый маркер.
+- Коррелятор фильтрует источники по honeynet; Kibana сохраняет более широкий набор событий. Для разбора конкретного источника использовать `source.ip`.
+
+### Особенности конфигурации
+
+Telnet в Cowrie выключен: Nmap распознаёт его как honeypot. Конфиги Dionaea сохраняются в ASCII из-за обнаруженного сбоя загрузчика. OpenCanary поддерживает ограниченный набор баннеров MySQL и версий MSSQL; выбранные значения согласованы с образами серверов. Для pid-файла OpenCanary в read-only контейнере выделен tmpfs `/run`.
+
+## Обновление скриншотов
+
+С Windows-хоста с доступом к management-сети:
+
+```powershell
+$env:ELASTIC_PASSWORD="..."
+$env:CORRELATOR_KEY="..."
+python scripts\shots.py
+# Отдельные виды:
+python scripts\shots.py correlator timeline
+```
+
+Значения берутся из `/opt/mirage/stack/.env`. Пароли не следует добавлять в репозиторий. Терминальные иллюстрации пересоздаются через `scripts/termshot.py` из сохранённого вывода команд.
+
+## Структура проекта
+
+| Путь | Назначение |
 |---|---|
-| `Vagrantfile` | VM: 8 GB / 4 vCPU, NAT + host-only + intnet |
-| `provision/ansible/` | роли `base`, `network`, `docker`, `firewall`, `suricata`, `stack`, `observability` |
-| `stack/docker-compose.yml` | ловушки + Vector, Elasticsearch, Kibana, correlator, web-proxy |
-| `stack/traps/` | конфиги Cowrie ×2, OpenCanary, Dionaea, nginx |
-| `stack/apps/` | FastAPI: `web.py` (веб-ловушка) и `correlator.py` (ATT&CK + UI) |
-| `stack/elastic/` | index-template, генератор saved objects, init security |
-| `honeytokens/` | `generate.py`: токены T1–T4 и fake-ФС Cowrie |
-| `scripts/` | VirtualBox, lab mode, запуск в Kali, проверки, скриншоты (`shots.py`) |
-| `attacker/` | `run-all.sh` (kill chain), smoke-тест, словари |
-| `tests/e2e/` | `check_campaign.py`: сквозная проверка кампании |
-| `.github/workflows/ci.yml` | CI: юнит-тесты, валидация ATT&CK-правил и saved objects |
-| `docs/screenshots/` | скрины для README |
+| `Vagrantfile` | Ресурсы VM и три сетевых интерфейса |
+| `provision/ansible/` | Установка и настройка инфраструктуры, IDS и сервисов |
+| `stack/docker-compose.yml` | Ловушки, прокси, сборщик, хранилище и аналитика |
+| `stack/traps/` | Конфигурация Cowrie, OpenCanary, Dionaea и nginx |
+| `stack/apps/` | Веб-ловушка, коррелятор, ATT&CK-правила и юнит-тесты |
+| `stack/elastic/` | Шаблоны индексов, saved objects Kibana и настройка доступа |
+| `honeytokens/` | Генерация учебных токенов и файловых систем |
+| `scripts/` | Управление VM, изоляция, проверки и скриншоты |
+| `attacker/` | Сценарии для Kali и учебные словари |
+| `tests/e2e/` | Сквозная проверка кампании |
+| `.github/workflows/ci.yml` | Автоматические проверки |
+| `docs/` | Архитектура и иллюстрации |
