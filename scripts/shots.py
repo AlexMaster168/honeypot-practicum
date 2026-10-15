@@ -12,7 +12,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 MGMT = os.getenv("MGMT_IP", "192.168.56.10")
-ES_PW = os.environ["ELASTIC_PASSWORD"]
+ES_PW = os.getenv("ELASTIC_PASSWORD", "")   # only needed for the Kibana shot
 CK = os.environ["CORRELATOR_KEY"]
 OUT = Path(__file__).resolve().parent.parent / "docs" / "screenshots"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -83,10 +83,15 @@ def shot_kibana(browser):
 
 
 def main():
+    # Optional argv picks targets: correlator | timeline | kibana (default: all).
+    # MGMT_IP defaults to the management network but can point at a local instance.
+    targets = {'correlator': shot_correlator, 'timeline': shot_campaign_timeline,
+               'kibana': shot_kibana}
+    chosen = [targets[a] for a in sys.argv[1:] if a in targets] or list(targets.values())
     with sync_playwright() as p:
         browser = p.chromium.launch()
         ok = True
-        for fn in (shot_correlator, shot_campaign_timeline, shot_kibana):
+        for fn in chosen:
             try:
                 fn(browser)
             except Exception as e:

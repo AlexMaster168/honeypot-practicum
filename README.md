@@ -118,11 +118,16 @@ ECS-подобную схему и шлёт в Elasticsearch. Общие пол�
 Дашборд **Mirage — Attack Overview** (с Windows-хоста:
 `http://192.168.56.10:5601`, вход `elastic` / пароль из `.env`) показывает число
 событий, распределение по фейковым хостам, таймлайн по типу ловушки, топ IP
-атакующих, перебираемые креды, целевые сервисы и команды в SSH. Дата хранится
-в UTC. `source.ip` смаплен как тип `ip` (шаблон `stack/elastic/index-template.json`
-применяется контейнером `es-init` до первой записи Vector).
+атакующих, перебираемые креды, целевые сервисы, команды в SSH, а также
+сигнатуры IDS (Suricata), **TLS JA3-фингерпринты** и обнаруженные сканеры.
+Дата хранится в UTC. `source.ip` смаплен как тип `ip`
+(шаблон `stack/elastic/index-template.json` применяется контейнером `es-init`
+до первой записи Vector).
 
 ![Kibana — Attack Overview](docs/screenshots/stage3-kibana-dashboard.png)
+
+> Скриншот выше — версия дашборда до добавления панелей IDS/JA3/сканеров;
+> они появятся на нём после пересъёмки на пересобранном стенде.
 
 **Security включён** (это закрывает ограничение из старого плана): ES требует
 аутентификации, у Kibana/Vector/correlator свои пользователи. Пароли и ключи
@@ -155,35 +160,49 @@ bash /vagrant/scripts/check-observability.sh
 
 `correlator` (`stack/apps/correlator.py`, UI на `192.168.56.10:8088`, Basic-auth
 `analyst` / `CORRELATOR_KEY`) склеивает события по IP источника в «кампании»
-(окно 30 минут), размечает техники **MITRE ATT&CK** по правилам
-`stack/apps/attack.yml` и поднимает алерт `credential-reuse`, когда honeytoken
-засветился не там, где был подкинут.
+(окно 30 минут) и размечает техники **MITRE ATT&CK** по каталогу
+`stack/apps/attack.yml` (24 техники, 17 правил на команды). Источники вне
+honeynet (NAT-адрес VM, link-local IPv6) отбрасываются — в таймлайне только
+атаки, без фонового шума.
 
-![correlator — таймлайн атак](docs/screenshots/stage7-correlator.png)
+UI состоит из трёх блоков:
+
+- **⚠ Алерты** — `credential-reuse`, когда honeytoken засветился не там, где был
+  подкинут; уникальность токена указывает точный источник утечки. Те же алерты
+  отдаёт `GET /api/alerts`, а при заданном `ALERT_WEBHOOK` — пушатся наружу
+  (в изолированной лабе no-op).
+- **Боковое перемещение** — граф: атакующий → хост входа → цели, куда дошли по
+  украденным кредам.
+- **ATT&CK · покрытие** — матрица тактик; наблюдавшиеся техники подсвечены.
+
+![correlator — алерты, граф и ATT&CK-матрица](docs/screenshots/stage7-correlator.png)
 
 Полный прогон kill chain одной командой (lab mode должен быть включён):
 
 ```powershell
 .\scripts\lab-mode.ps1 on
-.\scripts\kali-run.ps1 attacker\run-all.sh          # recon → брут → токены → lateral → SMB
+.\scripts\kali-run.ps1 attacker\run-all.sh          # recon → брут → токены → lateral → persistence → SMB
 vagrant ssh -c "sudo python3 /vagrant/tests/e2e/check_campaign.py"
 ```
 
-`run-all.sh` проходит recon → веб-пробы → брут SSH → discovery и чтение токена →
-lateral SSH по паролю backup → git deploy-key → эмуляция эксфила → SMB.
+`run-all.sh` проходит recon → веб-пробы (вкл. TLS для JA3) → брут SSH → discovery
+и чтение токена → lateral SSH по паролю backup → git deploy-key → глубокая
+разведка, persistence и defense evasion → эмуляция эксфила → SMB.
 `check_campaign.py` требует кампанию с ≥8 техниками ATT&CK и алертом
 credential-reuse и проверяет, что она лежит в Elasticsearch.
 
-Проверено 12 октября 2026: кампания `10.66.0.50` — **11 техник**
-(T1021.002, T1021.004, T1041, T1057, T1078, T1082, T1083, T1105, T1110, T1190,
-T1552.001) и **2 алерта credential-reuse** (токены T1 из `.bash_history` и T4 из
-git-истории, оба на db-prod01). `check_campaign.py` → **PASS**.
+Логика correlator (правила ATT&CK, фильтр шума, алерты, граф) и веб-ловушка
+покрыты юнит-тестами `stack/apps/tests`, которые гоняет CI
+([.github/workflows/ci.yml](.github/workflows/ci.yml)) на каждый push.
+Последний сквозной прогон на живом стенде (до этой доработки) дал кампанию
+`10.66.0.50` с 11 техниками и 2 алертами credential-reuse, `check_campaign.py`
+→ **PASS**; расширенный `run-all.sh` покрывает ~20 техник (см. скриншот выше).
 
-Скриншоты Kibana и correlator обновляются одной командой с хоста:
+Скриншоты correlator и Kibana пересобираются с хоста:
 
 ```powershell
 $env:ELASTIC_PASSWORD="..."; $env:CORRELATOR_KEY="..."   # из /opt/mirage/stack/.env
-python scripts\shots.py
+python scripts\shots.py                 # все; или: python scripts\shots.py correlator timeline
 ```
 
 ## Этап 9: разбор атаки (отчёт)
@@ -213,10 +232,11 @@ flowchart LR
 
 ### Как это выглядит у защитника
 
-Коррелятор склеил все 70 событий в одну кампанию и разметил каждое по
-MITRE ATT&CK. Видна точная последовательность: веб-пробы → брут →
+Коррелятор склеил все события в одну кампанию и разметил каждое по
+MITRE ATT&CK. Видна точная последовательность: скан → веб-пробы → брут →
 успешный вход → discovery → чтение файла с токеном → переход на db-prod01
-по украденным кредам → эмуляция эксфила → SMB на fs01.
+по украденным кредам → закрепление и сокрытие следов → эмуляция эксфила →
+SMB на fs01.
 
 ![таймлайн кампании с разметкой ATT&CK](docs/screenshots/stage9-timeline.png)
 
@@ -230,6 +250,9 @@ MITRE ATT&CK. Видна точная последовательность: ве
 | Поиск кредов в файлах | srv-web01 | `cat /var/www/.env`, `/root/.bash_history` | T1552.001 |
 | Боковое перемещение (SSH) | db-prod01 | вход по паролю `backup` и по deploy-ключу | T1021.004, T1078 |
 | Разведка на БД | db-prod01 | `cat customers.csv`, `README.txt` | T1082, T1083 |
+| Разведка сети/аккаунтов | srv-web01 | `netstat`, `ss`, `ip addr`, `getent passwd`, `last` | T1016, T1049, T1033, T1087 |
+| Закрепление | srv-web01 | `crontab`, `>> authorized_keys` | T1053.003, T1098.004 |
+| Эскалация и сокрытие | srv-web01 | `sudo`, `iptables -F`, `history -c` | T1548.003, T1562.004, T1070.003 |
 | Перенос/эксфильтрация | srv-web01 | `wget` / `curl -T` (эмуляция) | T1105, T1041 |
 | Боковое перемещение (SMB) | fs01 | подключение к шарам | T1021.002 |
 
@@ -250,8 +273,9 @@ MITRE ATT&CK. Видна точная последовательность: ве
   доказывает успешный lateral movement; `curl -T` в Cowrie не доказывает
   реальную отправку данных.
 - Имя инструмента определяется по User-Agent, а его легко подделать.
-- В таймлайне коррелятора видны и шумовые «кампании» с NAT-адресов
-  (10.0.2.x) и IPv6 — это Suricata ловит служебный трафик VM, не атаку.
+- Коррелятор берёт только источники из honeynet `10.66.0.0/24`; служебный
+  трафик VM (NAT-адрес, link-local IPv6) в кампании не попадает. В Kibana же
+  видны все события — там фильтруй по `source.ip` при разборе.
 
 ## Структура
 
@@ -267,4 +291,5 @@ MITRE ATT&CK. Видна точная последовательность: ве
 | `scripts/` | VirtualBox, lab mode, запуск в Kali, проверки, скриншоты (`shots.py`) |
 | `attacker/` | `run-all.sh` (kill chain), smoke-тест, словари |
 | `tests/e2e/` | `check_campaign.py`: сквозная проверка кампании |
+| `.github/workflows/ci.yml` | CI: юнит-тесты, валидация ATT&CK-правил и saved objects |
 | `docs/screenshots/` | скрины для README |
