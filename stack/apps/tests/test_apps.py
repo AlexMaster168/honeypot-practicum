@@ -61,3 +61,57 @@ def test_ingest_rejects_unauthenticated_client(monkeypatch):
     client = TestClient(correlator.app)
     assert client.post('/ingest', content='{}').status_code == 401
     assert client.get('/api/campaigns').status_code == 401
+
+
+def test_out_of_scope_sources_are_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(correlator, 'DB', tmp_path / 'e.sqlite')
+    monkeypatch.setattr(correlator, 'REGISTRY', tmp_path / 'absent')
+    base = {'@timestamp': '2026-10-12T10:00:00Z', 'event': {'action': 'login.failed'}}
+    with correlator.connection() as db:
+        assert correlator.ingest_one(db, {**base, 'source': {'ip': '10.66.0.50'}})      # attacker
+        assert not correlator.ingest_one(db, {**base, 'source': {'ip': '10.0.2.15'}})    # NAT noise
+        assert not correlator.ingest_one(db, {**base, 'source': {'ip': 'fe80::2'}})      # link-local
+        assert db.execute('SELECT count(*) FROM events').fetchone()[0] == 1
+
+
+def test_expanded_attack_rules():
+    def t(cmd):
+        return correlator.classify({'event': {'action': 'command.input'},
+                                    'process': {'command_line': cmd}})[0]
+    assert 'T1049' in t('netstat -tlnp')
+    assert 'T1087' in t('cat /etc/passwd')
+    assert 'T1053.003' in t('crontab -l')
+    assert 'T1070.003' in t('history -c')
+    assert 'T1016' in t('ip addr show')
+    assert 'T1098.004' in t('echo key >> ~/.ssh/authorized_keys')
+
+
+def test_catalog_covers_every_classifiable_technique():
+    # every id a rule can emit must have a human label for the UI matrix
+    rule_ids = {r['id'] for r in correlator.RULES['commands']}
+    hardcoded = {'T1110', 'T1078', 'T1190', 'T1552.001', 'T1046', 'T1021.002', 'T1021.004'}
+    assert (rule_ids | hardcoded) <= set(correlator.CATALOG)
+
+
+def test_alerts_collected_and_deduplicated(tmp_path, monkeypatch):
+    monkeypatch.setattr(correlator, 'DB', tmp_path / 'e.sqlite')
+    monkeypatch.setattr(correlator, 'REGISTRY', tmp_path / 'absent')
+    token = {'id': 'T1', 'value': 'b' * 32, 'origin': 'srv-web01:/root/.bash_history'}
+    ev = lambda ts: {'@timestamp': ts, 'source': {'ip': '10.66.0.50'},
+                     'event': {'action': 'login.success'}, 'honeypot': {'name': 'db-prod01'},
+                     'user': {'password': token['value']}}
+    with correlator.connection() as db:
+        monkeypatch.setattr(correlator, 'REGISTRY', tmp_path / 'reg.yml')
+        (tmp_path / 'reg.yml').write_text(json.dumps([token]))
+        correlator.ingest_one(db, ev('2026-10-12T10:00:00Z'))
+        correlator.ingest_one(db, ev('2026-10-12T10:05:00Z'))  # same reuse, different event
+        alerts = correlator.collect_alerts(db)
+    reuse = [a for a in alerts if a['type'] == 'credential-reuse']
+    assert len(reuse) == 1 and reuse[0]['severity'] == 'high' and reuse[0]['target'] == 'db-prod01'
+
+
+def test_lateral_edges_from_reuse_alerts():
+    camps = [{'alerts': [{'type': 'credential-reuse', 'origin': 'srv-web01:/root/.bash_history',
+                          'target': 'db-prod01'}]}]
+    hosts, edges = correlator.lateral_data(camps)
+    assert ('srv-web01', 'db-prod01') in edges and 'db-prod01' in hosts

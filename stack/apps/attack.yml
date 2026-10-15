@@ -1,8 +1,53 @@
+# MITRE ATT&CK mapping for Mirage.
 # Candidate techniques inferred from observable traffic, not proof of compromise.
+#
+# `catalog` — id -> human name + tactic, used to label techniques and to draw the
+#   ATT&CK matrix in the correlator UI (seen techniques are highlighted).
+# `commands` — regex on the Cowrie command line -> technique id (name from catalog).
+#   Other signals (login.failed threshold, decoy reads, SMB, token reuse, IDS scan)
+#   are classified in correlator.py directly.
+
+catalog:
+  T1595:     {name: Active Scanning,                     tactic: Reconnaissance}
+  T1046:     {name: Network Service Discovery,           tactic: Discovery}
+  T1190:     {name: Exploit Public-Facing Application,   tactic: Initial Access}
+  T1110:     {name: Brute Force,                         tactic: Credential Access}
+  T1078:     {name: Valid Accounts,                      tactic: Defense Evasion}
+  T1552.001: {name: Credentials In Files,                tactic: Credential Access}
+  T1082:     {name: System Information Discovery,        tactic: Discovery}
+  T1083:     {name: File and Directory Discovery,        tactic: Discovery}
+  T1057:     {name: Process Discovery,                   tactic: Discovery}
+  T1033:     {name: System Owner/User Discovery,         tactic: Discovery}
+  T1016:     {name: System Network Configuration Discovery, tactic: Discovery}
+  T1049:     {name: System Network Connections Discovery, tactic: Discovery}
+  T1087:     {name: Account Discovery,                   tactic: Discovery}
+  T1105:     {name: Ingress Tool Transfer,               tactic: Command and Control}
+  T1021.004: {name: "Remote Services: SSH",              tactic: Lateral Movement}
+  T1021.002: {name: "Remote Services: SMB/Windows Admin Shares", tactic: Lateral Movement}
+  T1053.003: {name: "Scheduled Task/Job: Cron",          tactic: Persistence}
+  T1136.001: {name: "Create Account: Local Account",     tactic: Persistence}
+  T1098.004: {name: "Account Manipulation: authorized_keys", tactic: Persistence}
+  T1548.003: {name: "Abuse Elevation Control: Sudo",     tactic: Privilege Escalation}
+  T1222:     {name: File and Directory Permissions Modification, tactic: Defense Evasion}
+  T1070.003: {name: "Indicator Removal: Clear Command History", tactic: Defense Evasion}
+  T1562.004: {name: "Impair Defenses: Disable or Modify System Firewall", tactic: Defense Evasion}
+  T1041:     {name: Exfiltration Over C2 Channel,        tactic: Exfiltration}
+
 commands:
-  - {id: T1082, name: System information discovery, pattern: '(hostname|uname|/etc/os-release|\bid\b)'}
-  - {id: T1083, name: File and directory discovery, pattern: '(\bls\b|\bfind\b|\bpwd\b)'}
-  - {id: T1057, name: Process discovery, pattern: '(\bps\b|\btop\b)'}
-  - {id: T1552.001, name: Credentials in files, pattern: '(\.env|bash_history|id_rsa|id_ed25519)'}
-  - {id: T1105, name: Ingress tool transfer attempt, pattern: '(\bwget\b|\bcurl\b|\btftp\b)'}
-  - {id: T1041, name: Exfiltration attempt, pattern: '(curl.*(-T|--upload-file)|scp.*customers|POST.*customers)'}
+  - {id: T1082,     pattern: '(hostname|uname|/etc/os-release|lsb_release|\bid\b|lscpu|\bfree\b|\bdf\b)'}
+  - {id: T1083,     pattern: '(\bls\b|\bfind\b|\bpwd\b|\bcat\b\s+/var|\bll\b)'}
+  - {id: T1057,     pattern: '(\bps\b|\btop\b|\bhtop\b)'}
+  - {id: T1033,     pattern: '(\bwhoami\b|\bwho\b|\bw\b|\blast\b|\bgroups\b)'}
+  - {id: T1016,     pattern: '(\bifconfig\b|\bip\s+a|\bip\s+addr|\bip\s+route|\broute\b|/etc/resolv\.conf|\barp\b)'}
+  - {id: T1049,     pattern: '(\bnetstat\b|\bss\s+-|\blsof\b)'}
+  - {id: T1087,     pattern: '(/etc/passwd|/etc/shadow|\bgetent\b|/etc/group)'}
+  - {id: T1552.001, pattern: '(\.env|bash_history|id_rsa|id_ed25519|\.aws/credentials|\.ssh/)'}
+  - {id: T1105,     pattern: '(\bwget\b|\bcurl\b|\btftp\b|\bscp\b|\bftp\b)'}
+  - {id: T1041,     pattern: '(curl.*(-T|--upload-file)|scp.*customers|POST.*customers|base64.*customers)'}
+  - {id: T1053.003, pattern: '(\bcrontab\b|/etc/cron|/var/spool/cron)'}
+  - {id: T1136.001, pattern: '(\buseradd\b|\badduser\b)'}
+  - {id: T1098.004, pattern: '(authorized_keys|ssh-keygen|ssh-copy-id)'}
+  - {id: T1548.003, pattern: '(\bsudo\b|/etc/sudoers)'}
+  - {id: T1222,     pattern: '(\bchmod\b|\bchown\b|\bchattr\b)'}
+  - {id: T1070.003, pattern: '(history\s+-c|rm\s+.*bash_history|\bshred\b|unset\s+HISTFILE)'}
+  - {id: T1562.004, pattern: '(iptables\s+-F|ufw\s+disable|systemctl\s+stop\s+(firewalld|ufw)|setenforce\s+0)'}

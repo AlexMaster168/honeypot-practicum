@@ -78,6 +78,15 @@ visuals = [
     vis("mirage-top-svc", "Targeted services", {
         "title": "Targeted services", "type": "table",
         "aggs": [count, terms("honeypot.service", 15)], "params": {"perPage": 10, "showTotal": True}}),
+    vis("mirage-ids", "IDS signatures (Suricata)", {
+        "title": "IDS signatures (Suricata)", "type": "table",
+        "aggs": [count, terms("rule.name", 15)], "params": {"perPage": 10, "showTotal": True}}),
+    vis("mirage-ja3", "TLS JA3 fingerprints", {
+        "title": "TLS JA3 fingerprints", "type": "table",
+        "aggs": [count, terms("tls.ja3.hash", 15)], "params": {"perPage": 10, "showTotal": True}}),
+    vis("mirage-tools", "Scanners detected (by UA)", {
+        "title": "Scanners detected (by UA)", "type": "table",
+        "aggs": [count, terms("tool.name", 15)], "params": {"perPage": 10, "showTotal": True}}),
 ]
 
 # Tables use Kibana's stable renderer for the total and time buckets.
@@ -100,6 +109,9 @@ layout = [
     ("mirage-top-creds", 16,  8, 16, 12),
     ("mirage-top-svc",   32,  8, 16, 12),
     ("mirage-top-cmds",   0, 20, 48, 12),
+    ("mirage-ids",        0, 32, 16, 12),
+    ("mirage-ja3",       16, 32, 16, 12),
+    ("mirage-tools",     32, 32, 16, 12),
 ]
 panels, refs = [], []
 for i, (vid, x, y, w, h) in enumerate(layout):

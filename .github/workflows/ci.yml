@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install app dependencies
+        run: pip install -r stack/apps/requirements.txt
+
+      - name: Unit tests (correlator rules, web trap, noise filter, alerts)
+        run: python -m pytest stack/apps/tests -q
+
+      - name: Validate ATT&CK rules
+        run: |
+          python - <<'PY'
+          import re, yaml
+          d = yaml.safe_load(open("stack/apps/attack.yml"))
+          cat = set(d["catalog"])
+          for rule in d["commands"]:
+              re.compile(rule["pattern"])              # patterns must compile
+              assert rule["id"] in cat, rule["id"]     # every id has a label
+          print(f"ok: {len(cat)} techniques, {len(d['commands'])} command rules")
+          PY
+
+      - name: Kibana saved objects generate cleanly
+        working-directory: stack/elastic
+        run: |
+          python make_saved_objects.py
+          python - <<'PY'
+          import json
+          objs = [json.loads(l) for l in open("kibana-export.ndjson", encoding="utf-8")]
+          assert any(o["type"] == "dashboard" for o in objs)
+          assert any(o["type"] == "index-pattern" for o in objs)
+          print(f"ok: {len(objs)} saved objects")
+          PY
+
+      - name: Shell scripts parse
+        run: bash -n attacker/run-all.sh attacker/setup-net.sh scripts/trap-events.sh

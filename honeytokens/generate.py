@@ -58,12 +58,18 @@ def main():
         subprocess.run(git + ['commit', '-qm', 'Remove key from current checkout'], check=True)
         subprocess.run(git + ['update-server-info'], check=True)
     os_release = b'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nNAME="Debian GNU/Linux"\nVERSION_ID="12"\n'
+    # Believable background so discovery commands return real content, not "command not found".
+    crontab = b'# m h dom mon dow user  command\n0 2 * * * backup  /usr/local/bin/db-backup.sh >> /var/log/backup.log 2>&1\n'
+    authkeys = b'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOps0deploykeyMIRAGEtrainingonlyXXXXXXXXXXXXXX deploy@ci\n'
     for host in ('web01', 'db01'):
         tree = pickle.loads(Path(args.base).read_bytes()) # only bundled trusted Cowrie data
         insert(tree, '/etc/os-release', os_release)
+        insert(tree, '/etc/crontab', crontab)
+        insert(tree, '/root/.ssh/authorized_keys', authkeys)
         if host == 'web01':
             insert(tree, '/root/.bash_history', f"ssh backup@10.66.0.20\n# backup password: {t['T1']}\nmysql -h 10.66.0.20 -u backup -p'{t['T1']}'\n".encode())
             insert(tree, '/var/www/.env', env.encode())
+            insert(tree, '/var/www/html/config.php', f"<?php\n$dbhost='10.66.0.20';\n$dbuser='backup';\n$dbpass='{t['T2']}';\n".encode())
         else:
             customers = b'id,name,email\n1,Training Customer,customer@example.invalid\n'
             readme = b'Archive: \\10.66.0.30\\Backups\nFinance share is on fs01.\n'
@@ -73,6 +79,7 @@ def main():
             for home in ('/var/backups', '/home/backup', '/home/deploy', '/root'):
                 insert(tree, f'{home}/customers.csv', customers)
                 insert(tree, f'{home}/README.txt', readme)
+            insert(tree, '/root/.mysql_history', b"show databases;\nuse crm;\nselect * from customers limit 5;\n")
         (out / f'{host}.pickle').write_bytes(pickle.dumps(tree))
     (out / 'db-userdb.txt').write_text(f"backup:x:{t['T1']}\n")
     print('Synthetic seeds ready (values omitted)')

