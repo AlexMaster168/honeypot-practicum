@@ -330,7 +330,7 @@ def dashboard():
     .sev-high b{color:#ff6b6b}.sev-medium b{color:#ffc278}.ts{color:#88a;float:right;font-size:12px}
     .ok{color:#72dbcc}
     .badge{background:#b23b3b;color:#fff;font-size:12px;padding:2px 8px;border-radius:10px;vertical-align:middle}
-    .matrix{display:flex;gap:10px;overflow-x:auto}.col{min-width:120px}.col h4{margin:0 0 6px;font-size:12px;color:#9fb2cf}
+    .matrix{display:flex;flex-wrap:wrap;gap:10px}.col{min-width:120px;flex:1 0 auto}.col h4{margin:0 0 6px;font-size:12px;color:#9fb2cf}
     .tech{background:#13203a;color:#5e7599;font-size:11px;padding:5px 6px;border-radius:5px;margin-bottom:4px}
     .tech.hit{background:#1f6f52;color:#eafff4;font-weight:600}
     table{border-collapse:collapse;width:100%;font-size:12px}
